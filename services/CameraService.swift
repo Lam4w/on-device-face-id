@@ -1,183 +1,230 @@
-import Foundation
 import AVFoundation
 import UIKit
+import Combine // Needed for PassthroughSubject
 
-/// Service responsible for camera operations
-class CameraService: NSObject, ObservableObject {
-    /// The capture session
-    private let captureSession = AVCaptureSession()
-    
-    /// Video preview layer
-    private var previewLayer: AVCaptureVideoPreviewLayer?
-    
-    /// Photo output
-    private let photoOutput = AVCapturePhotoOutput()
-    
-    /// Video output for preview
-    private let videoOutput = AVCaptureVideoDataOutput()
-    
-    /// Camera position (front by default)
-    private var cameraPosition: AVCaptureDevice.Position = .front
-    
-    /// Queue for processing video frames
-    private let videoQueue = DispatchQueue(label: "videoQueue", qos: .userInteractive)
-    
-    /// Callback for preview images
-    var captureCallback: ((UIImage) -> Void)?
-    
-    /// Checks if the camera is running
-    var isRunning: Bool {
-        captureSession.isRunning
-    }
-    
-    /// Initializes the camera
+/// Protocol defining camera operations.
+protocol CameraOperating: ObservableObject {
+    var capturedImage: UIImage? { get set } // Published property for captured image
+    var isCameraAvailable: Bool { get }
+    var previewLayer: AVCaptureVideoPreviewLayer { get }
+    var photoCaptureError: Error? { get set } // Published property for errors
+
+    func startSession()
+    func stopSession()
+    func capturePhoto()
+    func requestPermission() async -> Bool
+}
+
+/// Manages the device camera using AVFoundation for capturing photos.
+class CameraService: NSObject, CameraOperating, AVCapturePhotoCaptureDelegate {
+
+    // MARK: - Published Properties
+    @Published var capturedImage: UIImage? = nil
+    @Published var photoCaptureError: Error? = nil
+
+    // MARK: - Private Properties
+    private var captureSession: AVCaptureSession?
+    private var photoOutput: AVCapturePhotoOutput?
+    private var videoPreviewLayer: AVCaptureVideoPreviewLayer?
+    private var backCamera: AVCaptureDevice?
+    private var frontCamera: AVCaptureDevice?
+    private var currentCamera: AVCaptureDevice?
+    private var isSessionRunning = false
+
     override init() {
         super.init()
+        setupSession()
     }
-    
-    /// Starts the camera session
-    /// - Throws: FaceRecognitionError if camera setup fails
-    func start() async throws {
-        // Check authorization status
+
+    // MARK: - CameraOperating Conformance
+
+    var isCameraAvailable: Bool {
+        return frontCamera != nil || backCamera != nil
+    }
+
+    /// Provides the preview layer for display in the UI.
+    var previewLayer: AVCaptureVideoPreviewLayer {
+        // Return existing layer or create/configure a new one if needed
+        if let layer = videoPreviewLayer {
+            return layer
+        } else {
+            // Should ideally be configured during setupSession, return a dummy if necessary
+            let dummyLayer = AVCaptureVideoPreviewLayer()
+            dummyLayer.videoGravity = .resizeAspectFill
+            print("Warning: Returning dummy preview layer as session wasn't fully set up.")
+            return dummyLayer
+        }
+    }
+
+    /// Requests camera access permission from the user.
+    /// - Returns: True if permission is granted or already determined, false otherwise.
+    func requestPermission() async -> Bool {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
+        var isAuthorized = status == .authorized
+
         if status == .notDetermined {
-            let granted = await AVCaptureDevice.requestAccess(for: .video)
-            if !granted {
-                throw FaceRecognitionError.cameraUnavailable
-            }
-        } else if status != .authorized {
-            throw FaceRecognitionError.cameraUnavailable
+            isAuthorized = await AVCaptureDevice.requestAccess(for: .video)
         }
-        
-        // Reset capture session
-        if captureSession.isRunning {
-            captureSession.stopRunning()
+
+        return isAuthorized
+    }
+
+    /// Starts the AVFoundation capture session on a background thread.
+    func startSession() {
+        guard let session = captureSession, !isSessionRunning else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            session.startRunning()
+            self?.isSessionRunning = true
+            print("CameraService: Capture session started.")
         }
-        
-        captureSession.beginConfiguration()
-        captureSession.sessionPreset = .high
-        captureSession.inputs.forEach { captureSession.removeInput($0) }
-        captureSession.outputs.forEach { captureSession.removeOutput($0) }
-        
-        // Set up camera input
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: cameraPosition) else {
-            throw FaceRecognitionError.cameraUnavailable
+    }
+
+    /// Stops the AVFoundation capture session on a background thread.
+    func stopSession() {
+        guard let session = captureSession, isSessionRunning else { return }
+         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            session.stopRunning()
+            self?.isSessionRunning = false
+            print("CameraService: Capture session stopped.")
+         }
+    }
+
+    /// Initiates photo capture using the configured photo output.
+    func capturePhoto() {
+         guard let output = photoOutput, isSessionRunning else {
+             print("Error: Cannot capture photo. Session not running or output not configured.")
+             DispatchQueue.main.async {
+                 self.photoCaptureError = CameraError.captureFailed("Session not running or output nil")
+             }
+             return
+         }
+         print("CameraService: Initiating photo capture...")
+         let photoSettings = AVCapturePhotoSettings()
+         // Configure settings if needed (e.g., flash, format)
+         output.capturePhoto(with: photoSettings, delegate: self)
+     }
+
+    // MARK: - Private Setup Methods
+
+    /// Configures the AVCaptureSession, inputs, outputs, and preview layer.
+    private func setupSession() {
+        let session = AVCaptureSession()
+        session.sessionPreset = .photo // Use high quality preset
+
+        // Find cameras
+        if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) {
+            frontCamera = device
         }
-        
+        if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
+            backCamera = device
+        }
+
+        // Default to front camera
+        currentCamera = frontCamera ?? backCamera
+
+        guard let camera = currentCamera else {
+            print("Error: No suitable camera found.")
+            // Consider publishing an error state here
+            return
+        }
+
+        // Add Input
         do {
-            let input = try AVCaptureDeviceInput(device: device)
-            if captureSession.canAddInput(input) {
-                captureSession.addInput(input)
+            let input = try AVCaptureDeviceInput(device: camera)
+            if session.canAddInput(input) {
+                session.addInput(input)
             } else {
-                throw FaceRecognitionError.cameraUnavailable
-            }
-            
-            // Set up photo output
-            if captureSession.canAddOutput(photoOutput) {
-                captureSession.addOutput(photoOutput)
-                photoOutput.isHighResolutionCaptureEnabled = true
-                photoOutput.maxPhotoQualityPrioritization = .quality
-            } else {
-                throw FaceRecognitionError.cameraUnavailable
-            }
-            
-            // Set up video output for preview
-            if captureSession.canAddOutput(videoOutput) {
-                captureSession.addOutput(videoOutput)
-                videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
-                if let connection = videoOutput.connection(with: .video) {
-                    connection.videoOrientation = .portrait
-                    // Mirror video for front camera
-                    if cameraPosition == .front {
-                        connection.isVideoMirrored = true
-                    }
-                }
-            }
-            
-            captureSession.commitConfiguration()
-            
-            // Start running on a background thread
-            Task.detached(priority: .userInitiated) {
-                self.captureSession.startRunning()
+                print("Error: Could not add camera input to session.")
+                return
             }
         } catch {
-            throw FaceRecognitionError.cameraUnavailable
-        }
-    }
-    
-    /// Stops the camera session
-    func stop() {
-        if captureSession.isRunning {
-            captureSession.stopRunning()
-        }
-    }
-    
-    /// Captures a still image
-    /// - Parameter completion: Callback with Result containing UIImage or Error
-    func captureStillImage(completion: @escaping (Result<UIImage, Error>) -> Void) {
-        let settings = AVCapturePhotoSettings()
-        settings.flashMode = .off
-        
-        photoOutput.capturePhoto(with: settings, delegate: PhotoCaptureProcessor { image, error in
-            if let error = error {
-                completion(.failure(error))
-            } else if let image = image {
-                completion(.success(image))
-            } else {
-                completion(.failure(FaceRecognitionError.processingError("Unknown capture error")))
-            }
-        })
-    }
-    
-    /// Toggles between front and back camera
-    func toggleCamera() async throws {
-        cameraPosition = cameraPosition == .front ? .back : .front
-        try await start()
-    }
-}
-
-// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
-extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
-    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard let captureCallback = captureCallback,
-              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            print("Error creating camera input: \(error)")
             return
         }
-        
-        let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-        let context = CIContext()
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+
+        // Add Output
+        let output = AVCapturePhotoOutput()
+        if session.canAddOutput(output) {
+            session.addOutput(output)
+            self.photoOutput = output
+        } else {
+            print("Error: Could not add photo output to session.")
             return
         }
-        
-        let image = UIImage(cgImage: cgImage)
-        
-        DispatchQueue.main.async {
-            captureCallback(image)
-        }
-    }
-}
 
-/// Helper class to process photo capture
-private class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelegate {
-    private let completion: (UIImage?, Error?) -> Void
-    
-    init(completion: @escaping (UIImage?, Error?) -> Void) {
-        self.completion = completion
+        // Configure Preview Layer
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill
+        layer.connection?.videoOrientation = .portrait // Or dynamically update based on device orientation
+        self.videoPreviewLayer = layer
+
+        self.captureSession = session
+        print("CameraService: Session configured successfully.")
     }
-    
+
+    // MARK: - AVCapturePhotoCaptureDelegate
+
+    /// Delegate callback when a photo has been processed.
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        if let error = error {
-            completion(nil, error)
-            return
+        DispatchQueue.main.async { // Ensure UI updates happen on the main thread
+            if let error = error {
+                print("Error capturing photo: \(error.localizedDescription)")
+                self.photoCaptureError = CameraError.captureFailed(error.localizedDescription)
+                self.capturedImage = nil
+                return
+            }
+
+            guard let imageData = photo.fileDataRepresentation() else {
+                print("Error: Could not get image data from captured photo.")
+                self.photoCaptureError = CameraError.invalidData
+                self.capturedImage = nil
+                return
+            }
+
+            guard let image = UIImage(data: imageData) else {
+                 print("Error: Could not create UIImage from data.")
+                 self.photoCaptureError = CameraError.invalidData
+                 self.capturedImage = nil
+                 return
+             }
+
+            // Ensure the image is oriented correctly (especially from front camera)
+            let correctlyOrientedImage = self.fixOrientation(img: image)
+
+            print("CameraService: Photo captured successfully.")
+            self.capturedImage = correctlyOrientedImage
+            self.photoCaptureError = nil // Clear previous errors
         }
-        
-        guard let imageData = photo.fileDataRepresentation(),
-              let image = UIImage(data: imageData) else {
-            completion(nil, FaceRecognitionError.processingError("Failed to create image from data"))
-            return
+    }
+
+    /// Corrects the orientation of an image, often needed for front camera captures.
+    private func fixOrientation(img: UIImage) -> UIImage {
+        if img.imageOrientation == .up {
+            return img
         }
-        
-        completion(image, nil)
+
+        UIGraphicsBeginImageContextWithOptions(img.size, false, img.scale)
+        let rect = CGRect(x: 0, y: 0, width: img.size.width, height: img.size.height)
+        img.draw(in: rect)
+        let normalizedImage = UIGraphicsGetImageFromCurrentImageContext()!
+        UIGraphicsEndImageContext()
+        return normalizedImage
+    }
+
+    // MARK: - Custom Errors
+    enum CameraError: Error, LocalizedError {
+        case permissionDenied
+        case setupFailed(String)
+        case captureFailed(String)
+        case invalidData
+
+        var errorDescription: String? {
+            switch self {
+            case .permissionDenied: return "Camera access permission was denied."
+            case .setupFailed(let reason): return "Failed to set up camera: \(reason)"
+            case .captureFailed(let reason): return "Failed to capture photo: \(reason)"
+            case .invalidData: return "Captured photo data was invalid."
+            }
+        }
     }
 }
