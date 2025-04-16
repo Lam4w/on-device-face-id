@@ -1,3 +1,5 @@
+// CaptureView.swift (Updated)
+
 import SwiftUI
 import Combine
 
@@ -9,107 +11,148 @@ struct CaptureView: View {
     @Environment(\.dismiss) var dismiss
     @State private var isCapturing: Bool = false
     @State private var captureErrorMessage: String? = nil
-    @State private var showCameraFeed: Bool = false // State to delay preview until ready
+    @State private var showCameraFeed: Bool = false // Keep this for smooth loading
+
+    // Calculate circle diameter (e.g., 80% of screen width)
+    private var circleDiameter: CGFloat {
+        UIScreen.main.bounds.width * 0.8
+    }
 
     var body: some View {
         NavigationView {
-            ZStack {
-                // Make background visible for layout debugging
-                Color.gray.opacity(0.3).ignoresSafeArea() // Temporary background
+            // Main container VStack
+            VStack(spacing: 20) { // Add some spacing between elements
+                Spacer() // Push content down from Cancel button
 
-                // Only show CameraPreview if ready
-                if showCameraFeed {
-                    CameraPreview(cameraService: cameraService)
-                        .ignoresSafeArea()
-                        .transition(.opacity) // Optional fade-in
-                } else {
-                     // Show loading indicator or message while camera starts
-                     VStack {
-                         ProgressView()
-                         Text("Starting Camera...")
-                             .padding(.top)
-                             .foregroundColor(.secondary)
-                     }
+                // Circular Camera Preview Area
+                ZStack {
+                    // Only show CameraPreview if ready
+                    if showCameraFeed {
+                        CameraPreview(cameraService: cameraService)
+                            // Set a specific square frame for the preview
+                            .frame(width: circleDiameter, height: circleDiameter)
+                            // Clip the preview view into a circle
+                            .clipShape(Circle())
+                            // Optional: Add a simple white border like Face ID setup
+                            .overlay(Circle().stroke(Color.white.opacity(0.8), lineWidth: 4))
+                            .transition(.opacity) // Fade in
+                    } else {
+                        // Placeholder while loading
+                        Circle()
+                            .fill(Color.gray.opacity(0.3)) // Placeholder circle
+                            .frame(width: circleDiameter, height: circleDiameter)
+                            .overlay(ProgressView()) // Show spinner inside placeholder
+                    }
+                }
+                // Explicitly frame the ZStack to ensure layout space
+                .frame(width: circleDiameter, height: circleDiameter)
+
+
+                // Instructions Text (Style like image)
+                Text(mode == .enroll ? "Position face within the circle" : "Position face for Verification")
+                    .foregroundColor(.white) // White text on black background
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal) // Add horizontal padding
+
+                Spacer() // Push button towards bottom
+
+                // Capture Error Message (Keep for error feedback)
+                if let errorMsg = captureErrorMessage {
+                    Text(errorMsg)
+                        .foregroundColor(.white)
+                        .padding(8)
+                        .background(Color.red.opacity(0.8))
+                        .cornerRadius(8)
+                        .padding(.bottom, 5)
+                        .transition(.opacity)
+                        .onTapGesture {
+                            captureErrorMessage = nil
+                        }
                 }
 
-
-                // Overlay UI Elements (VStack)
-                VStack {
-                    // Instructions Text (unchanged)
-                     Text(mode == .enroll ? "Position face for Enrollment" : "Position face for Verification")
-                         // ... (styling) ...
-
-                    Spacer() // Pushes controls to the bottom
-
-                    // Capture Error Message (unchanged)
-                    if let errorMsg = captureErrorMessage {
-                         // ... (error text view) ...
+                // Capture Button (Keep existing style below the circle)
+                Button {
+                    if !isCapturing && showCameraFeed {
+                        print("Capture button tapped.")
+                        isCapturing = true
+                        captureErrorMessage = nil
+                        cameraService.capturePhoto()
                     }
-
-                    // Capture Button (ensure it's visible)
-                    Button {
-                        if !isCapturing && showCameraFeed { // Only allow capture if feed is shown
-                            print("Capture button tapped.")
-                            isCapturing = true
-                            captureErrorMessage = nil
-                            cameraService.capturePhoto()
+                } label: {
+                    ZStack {
+                         Circle()
+                            .fill(isCapturing ? Color.gray : Color.white)
+                            .frame(width: 70, height: 70)
+                         Circle()
+                            .stroke(Color.white, lineWidth: 4)
+                            .frame(width: 80, height: 80)
+                        if isCapturing {
+                            ProgressView()
+                                .tint(.white)
+                                .scaleEffect(1.5)
                         }
-                    } label: {
-                        // ... (Button ZStack styling - unchanged) ...
                     }
-                    .padding(.bottom, 30)
-                    .disabled(isCapturing || !showCameraFeed) // Disable if capturing OR feed not ready
-                    .opacity(showCameraFeed ? 1.0 : 0.0) // Hide button until camera is ready
+                }
+                .padding(.bottom, 30)
+                .disabled(isCapturing || !showCameraFeed)
+                .opacity(showCameraFeed ? 1.0 : 0.0) // Hide button until camera is ready
 
-                } // End VStack
-            } // End ZStack
+            } // End main VStack
+            .frame(maxWidth: .infinity, maxHeight: .infinity) // Ensure VStack fills space
+            .background(Color.black.ignoresSafeArea()) // Set black background, extending into safe areas
             .onAppear {
                 print("CaptureView: onAppear.")
-                // Request permission and start session here
+                // Keep the permission check and session start logic here
                 Task {
                     let granted = await cameraService.requestPermission()
                     if granted {
                          print("CaptureView: Permission granted. Configuring session...")
-                         // Now configure and start
                          cameraService.configureAndStartSession()
-                         // Allow a brief moment for session to start before showing preview
-                         // Adjust delay if needed, or monitor session running state
-                         try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-                         await MainActor.run { // Ensure UI update is on main thread
+                         try? await Task.sleep(nanoseconds: 150_000_000)
+                         await MainActor.run {
                              self.showCameraFeed = true
                              print("CaptureView: Showing camera feed.")
                          }
                     } else {
+                         // ... (permission denied handling remains the same) ...
                          print("CaptureView: Permission denied.")
                          captureErrorMessage = "Camera permission is required."
-                         // Optionally dismiss or show error prominently
-                         await Task.sleep(seconds: 2) // Show error briefly
-                         dismiss() // Auto-dismiss if no permission
-                         onComplete(nil) // Signal cancellation due to no permission
+                         await Task.sleep(seconds: 2)
+                         dismiss()
+                         await onComplete(nil) // Ensure completion handler is called even on error dismissal
                     }
                 }
             }
             .onDisappear {
                  print("CaptureView: onDisappear. Stopping session.")
                  cameraService.stopSession()
-                 showCameraFeed = false // Reset state when view disappears
+                 showCameraFeed = false
             }
             // onReceive handlers remain the same
              .onReceive(cameraService.$capturedImage) { image in
-                  // ... (existing code) ...
+                 if let capturedImage = image, isCapturing {
+                     print("CaptureView received image.")
+                     cameraService.capturedImage = nil
+                     isCapturing = false
+                     Task {
+                         await onComplete(capturedImage)
+                     }
+                 }
              }
              .onReceive(cameraService.$photoCaptureError) { error in
-                  // ... (existing code to set captureErrorMessage and isCapturing=false) ...
-                  if let captureError = error {
-                      print("CaptureView received error: \(captureError.localizedDescription)")
-                      captureErrorMessage = "Capture failed: \(captureError.localizedDescription)"
-                      isCapturing = false
-                      cameraService.photoCaptureError = nil
-                  }
+                 if let captureError = error {
+                     print("CaptureView received error: \(captureError.localizedDescription)")
+                     captureErrorMessage = "Capture failed: \(captureError.localizedDescription)"
+                     isCapturing = false
+                     cameraService.photoCaptureError = nil
+                 }
              }
-            .navigationTitle(mode == .enroll ? "Enroll Face" : "Verify Face")
-            .navigationBarTitleDisplayMode(.inline)
+            // Navigation Title can be removed if not desired for this look
+            // .navigationTitle(mode == .enroll ? "Enroll Face" : "Verify Face")
+            .navigationBarTitleDisplayMode(.inline) // Keep inline if title is present
             .toolbar {
+                // Keep Cancel button
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Cancel") {
                         print("Cancel button tapped.")
@@ -117,28 +160,23 @@ struct CaptureView: View {
                              cameraService.stopSession()
                              isCapturing = false
                         }
-                        onComplete(nil) // Signal cancellation
+                        // Call completion handler with nil on manual cancel
+                        Task { await onComplete(nil) }
                         dismiss()
                     }
+                    .foregroundColor(.white) // Make Cancel button white for contrast
                 }
             }
         } // End NavigationView
-        // Add an alert for critical errors like permission denied?
-        .alert("Camera Error", isPresented: .constant(captureErrorMessage != nil && !showCameraFeed)) { // Show alert if critical error before feed appears
+        .accentColor(.white) // Ensure toolbar items default to white if needed
+        // Alert can remain the same
+        .alert("Camera Error", isPresented: .constant(captureErrorMessage != nil && !showCameraFeed)) {
              Button("OK", role: .cancel) {
                  dismiss()
-                 onComplete(nil)
+                 Task { await onComplete(nil) } // Call completion handler on error dismissal
              }
         } message: {
              Text(captureErrorMessage ?? "An unknown camera error occurred.")
         }
-    }
-}
-
-// Helper extension for Task.sleep with seconds
-extension Task where Success == Never, Failure == Never {
-    static func sleep(seconds: Double) async {
-        let duration = UInt64(seconds * 1_000_000_000)
-        try? await Task.sleep(nanoseconds: duration)
     }
 }
