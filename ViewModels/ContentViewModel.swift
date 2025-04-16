@@ -124,15 +124,10 @@ class ContentViewModel: ObservableObject {
 
     /// Called when the ContentView appears. Loads initial state.
     func onAppear() {
-         loadInitialState() // Load enrollment status etc. (No camera start here)
-         // Permission request could be moved to CaptureView's onAppear if preferred
-         // Or kept here to request upfront. Let's keep it here for now.
-         Task {
-             let granted = await cameraService.requestPermission()
-             if !granted {
-                 setError("Camera permission denied. Please enable it in Settings.")
-             }
-         }
+         print("ContentView appeared.")
+         loadInitialState() // Load enrollment status etc.
+         // REMOVE permission request from here
+         // Task { ... cameraService.requestPermission() ... }
      }
 
     /// Called when the ContentView disappears. (No camera stop here)

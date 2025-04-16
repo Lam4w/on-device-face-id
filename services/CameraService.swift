@@ -31,9 +31,20 @@ class CameraService: NSObject, CameraOperating, AVCapturePhotoCaptureDelegate {
     private var currentCamera: AVCaptureDevice?
     private var isSessionRunning = false
 
+    private var setupResult: SessionSetupResult = .success // Track setup outcome
+
+    // MARK: - Session Setup Result Enum
+    private enum SessionSetupResult {
+        case success
+        case notAuthorized
+        case configurationFailed
+    }
+
     override init() {
         super.init()
-        setupSession()
+        // Defer session setup until permission is checked explicitly
+        // setupSession() // REMOVE from init
+        print("CameraService initialized. Session setup deferred.")
     }
 
     // MARK: - CameraOperating Conformance
@@ -59,33 +70,150 @@ class CameraService: NSObject, CameraOperating, AVCapturePhotoCaptureDelegate {
     /// Requests camera access permission from the user.
     /// - Returns: True if permission is granted or already determined, false otherwise.
     func requestPermission() async -> Bool {
+        print("CameraService: Requesting permission...")
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         var isAuthorized = status == .authorized
 
         if status == .notDetermined {
+            print("CameraService: Permission not determined, requesting...")
             isAuthorized = await AVCaptureDevice.requestAccess(for: .video)
+            print("CameraService: Permission request result: \(isAuthorized)")
+        } else {
+            print("CameraService: Permission status: \(status)")
         }
 
+        if !isAuthorized {
+            setupResult = .notAuthorized // Update setup result if not authorized
+        }
         return isAuthorized
     }
 
-    /// Starts the AVFoundation capture session on a background thread.
-    func startSession() {
-        guard let session = captureSession, !isSessionRunning else { return }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            session.startRunning()
-            self?.isSessionRunning = true
-            print("CameraService: Capture session started.")
+    /// Configures and starts the session *after* checking permissions.
+    /// Call this from CaptureView's onAppear.
+    func configureAndStartSession() {
+         print("CameraService: configureAndStartSession called.")
+         guard setupResult == .success else { // Don't proceed if already failed (e.g., auth)
+              print("CameraService: Skipping session start due to previous failure (\(setupResult)).")
+              // You might want to publish an error state here
+              return
+         }
+
+         // Ensure setup runs only once or is idempotent
+         if captureSession == nil {
+             setupSession() // Perform actual AVFoundation setup
+         }
+
+         guard setupResult == .success, let session = captureSession, !isSessionRunning else {
+             print("CameraService: Session start aborted. SetupResult: \(setupResult), Session Exists: \(captureSession != nil), Is Running: \(isSessionRunning)")
+             if setupResult != .success {
+                  // Set an error state if setup failed
+                  DispatchQueue.main.async {
+                      self.photoCaptureError = CameraError.setupFailed("Configuration failed or permission denied.")
+                  }
+             }
+             return
+         }
+
+         print("CameraService: Starting session on background thread...")
+         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+             session.startRunning()
+             self?.isSessionRunning = true
+             print("CameraService: Session started successfully.")
+         }
+     }
+
+// Make setupSession private and ensure it sets setupResult on failure
+    private func setupSession() {
+        print("CameraService: setupSession - Configuring AVFoundation components.")
+        // Check authorization status again just in case
+        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
+             print("CameraService: setupSession - Error: Not authorized.")
+             setupResult = .notAuthorized
+             return
+         }
+
+        captureSession = AVCaptureSession() // Create session instance here
+        guard let session = captureSession else {
+             print("CameraService: setupSession - Failed to create AVCaptureSession.")
+             setupResult = .configurationFailed
+             return
         }
+        session.sessionPreset = .photo // Use high quality preset
+
+        // Find cameras
+        if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) {
+            frontCamera = device
+        } else {
+            print("CameraService: setupSession - Front camera not found.")
+        }
+        // ... (find back camera if needed) ...
+        currentCamera = frontCamera // Default to front
+
+        guard let camera = currentCamera else {
+            print("CameraService: setupSession - Error: No suitable camera found.")
+            setupResult = .configurationFailed
+            captureSession = nil
+            return
+        }
+        print("CameraService: setupSession - Using camera: \(camera.localizedName)")
+
+        // Add Input
+        do {
+            let input = try AVCaptureDeviceInput(device: camera)
+            if session.canAddInput(input) {
+                session.addInput(input)
+                 print("CameraService: setupSession - Camera input added.")
+            } else {
+                print("CameraService: setupSession - Error: Could not add camera input to session.")
+                setupResult = .configurationFailed
+                captureSession = nil
+                return
+            }
+        } catch {
+            print("CameraService: setupSession - Error creating camera input: \(error)")
+            setupResult = .configurationFailed
+            captureSession = nil
+            return
+        }
+
+        // Add Output
+        let output = AVCapturePhotoOutput()
+        if session.canAddOutput(output) {
+            session.addOutput(output)
+            self.photoOutput = output
+            print("CameraService: setupSession - Photo output added.")
+        } else {
+            print("CameraService: setupSession - Error: Could not add photo output to session.")
+            setupResult = .configurationFailed
+            captureSession = nil
+            return
+        }
+
+        // Configure Preview Layer - Ensure session is assigned
+        let layer = AVCaptureVideoPreviewLayer(session: session) // Use the configured session
+        layer.videoGravity = .resizeAspectFill
+        layer.connection?.videoOrientation = .portrait
+        self.videoPreviewLayer = layer
+        print("CameraService: setupSession - Preview layer configured.")
+
+        setupResult = .success // Mark setup as successful if all steps passed
+        print("CameraService: setupSession - Configuration successful.")
     }
 
     /// Stops the AVFoundation capture session on a background thread.
     func stopSession() {
-        guard let session = captureSession, isSessionRunning else { return }
+        // Make sure session exists and is running before stopping
+        guard let session = captureSession, isSessionRunning else {
+             print("CameraService: stopSession - Session nil or not running.")
+             return
+        }
+         print("CameraService: Stopping session on background thread...")
          DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            session.stopRunning()
-            self?.isSessionRunning = false
-            print("CameraService: Capture session stopped.")
+             // Check session again inside async block
+             guard let self = self, let currentSession = self.captureSession, self.isSessionRunning else { return }
+             currentSession.stopRunning()
+             self.isSessionRunning = false
+             print("CameraService: Session stopped.")
          }
     }
 

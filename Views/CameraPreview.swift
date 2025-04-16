@@ -1,23 +1,41 @@
 import SwiftUI
 import AVFoundation
 
-/// A SwiftUI View that displays the camera preview feed.
 struct CameraPreview: UIViewRepresentable {
-    /// The CameraService instance providing the preview layer.
     @ObservedObject var cameraService: CameraService
 
-    /// Creates the underlying UIView (the preview layer's view).
     func makeUIView(context: Context) -> UIView {
-        let view = UIView(frame: UIScreen.main.bounds) // Or adjust frame as needed
-        cameraService.previewLayer.frame = view.bounds // Set frame here too
-        view.layer.addSublayer(cameraService.previewLayer)
-        print("CameraPreview: UIView created and preview layer added.")
+        let view = UIView() // Use default frame initially
+        // Ensure previewLayer is available before adding
+        if let layer = cameraService.videoPreviewLayer {
+             // Critical: Set the frame BEFORE adding the sublayer if possible
+             // layer.frame = view.bounds // Bounds might be zero here initially
+             view.layer.addSublayer(layer)
+             print("CameraPreview: makeUIView - Preview layer added to view.")
+        } else {
+             print("CameraPreview: makeUIView - Warning: Preview layer was nil.")
+        }
+        view.backgroundColor = .black // Set background to see view bounds easily
+        print("CameraPreview: makeUIView - View created.")
         return view
     }
 
-    /// Updates the UIView if needed (e.g., layout changes).
     func updateUIView(_ uiView: UIView, context: Context) {
-        // Update frame if layout changes
-        cameraService.previewLayer.frame = uiView.bounds
+        // This is where the frame is likely set correctly after layout
+        if let layer = cameraService.videoPreviewLayer {
+            // Ensure the layer's frame matches the UIView's bounds after layout
+            if layer.frame != uiView.bounds {
+                 layer.frame = uiView.bounds
+                 print("CameraPreview: updateUIView - Updated preview layer frame to: \(uiView.bounds)")
+            }
+             // Add layer here if it wasn't added in makeUIView (e.g., if session wasn't ready)
+             if layer.superlayer == nil {
+                 uiView.layer.addSublayer(layer)
+                 print("CameraPreview: updateUIView - Added preview layer as it wasn't present.")
+             }
+        } else {
+             print("CameraPreview: updateUIView - Warning: Preview layer is nil during update.")
+        }
+         print("CameraPreview: updateUIView - View frame: \(uiView.frame)")
     }
 }
